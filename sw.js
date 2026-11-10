@@ -1,5 +1,5 @@
 /* Offline shell for the current อุ่นใจทุกวัน PWA. Bump CACHE_NAME after code changes. */
-const CACHE_NAME = 'aunjai-current-pwa-v2';
+const CACHE_NAME = 'aunjai-current-pwa-v4';
 const APP_ROOT = new URL('./', self.registration.scope);
 const PRECACHE = [APP_ROOT.href, new URL('./manifest.webmanifest', APP_ROOT).href, new URL('./icons/icon-192.png', APP_ROOT).href, new URL('./icons/icon-512.png', APP_ROOT).href];
 self.addEventListener('install', (event) => { event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(PRECACHE))); self.skipWaiting(); });
