@@ -17,9 +17,51 @@ function jsonResponse(payload, status = 200, extraHeaders = {}) {
   });
 }
 
+async function handleDreamChat(request, env = {}) {
+  const cors = lotteryCorsHeaders(request);
+  if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: { ...cors, "access-control-allow-methods": "POST, OPTIONS", "access-control-allow-headers": "content-type", "access-control-max-age": "86400" } });
+  if (request.method !== "POST") return jsonResponse({ error: "Method not allowed" }, 405, cors);
+  if (!cors["access-control-allow-origin"]) return jsonResponse({ error: "Origin not allowed" }, 403);
+  const apiKey = env.GEMINI_API_KEY;
+  if (!apiKey) return jsonResponse({ error: "ยังไม่ได้ตั้งค่ากุญแจ AI ที่ฝั่งเซิร์ฟเวอร์" }, 503, cors);
+  let body;
+  try { body = await request.json(); } catch { return jsonResponse({ error: "ข้อมูลคำถามไม่ถูกต้อง" }, 400, cors); }
+  const message = String(body?.message || "").trim();
+  if (!message || message.length > 400) return jsonResponse({ error: "กรุณาพิมพ์ความฝันไม่เกิน 400 ตัวอักษร" }, 400, cors);
+  const history = Array.isArray(body?.history) ? body.history.slice(-8).map(item => ({
+    role: item?.role === "model" || item?.role === "assistant" ? "model" : "user",
+    parts: [{ text: String(item?.text || "").slice(0, 700) }],
+  })).filter(item => item.parts[0].text) : [{ role: "user", parts: [{ text: message }] }];
+  const prompt = "คุณคือผู้ช่วยภาษาไทยสำหรับพูดคุยเรื่องความฝันตามความเชื่อและวัฒนธรรมทั่วไป ตอบเป็นภาษาไทยสุภาพ เป็นมิตร และเข้าใจง่าย โดยตีความจากรายละเอียดที่ผู้ใช้เล่า ไม่อ้างว่าเป็นข้อเท็จจริง ไม่รับประกันโชคลาภหรือผลสลาก หากเสนอเลข ให้เรียกชัดเจนว่า ‘เลขตามความเชื่อที่ AI เสนอ’ และแยกจากเลขที่รวบรวมจากเว็บไซต์ ห้ามแต่งชื่อเว็บไซต์หรืออ้างว่าเลขมาจากหลายตำราถ้าไม่มีแหล่งข้อมูลจริง อาจให้ความหมายเชิงอารมณ์หรือชีวิตประจำวันควบคู่กัน หากข้อมูลไม่พอให้ถามรายละเอียดเพิ่มเติม ไม่ชี้นำให้เสี่ยงเงินหรือกู้เงิน ตอบประมาณ 2–5 ย่อหน้า และให้เลขเป็นตัวเลือกเพื่อความบันเทิงเท่านั้น.";
+  try {
+    const model = env.GEMINI_MODEL || "gemini-3.8-flash";
+    const upstream = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-goog-api-key": apiKey },
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: prompt }] },
+        contents: history,
+        generationConfig: { temperature: 0.75, maxOutputTokens: 700 },
+      }),
+    });
+    const result = await upstream.json().catch(() => ({}));
+    if (!upstream.ok) {
+      const status = upstream.status === 429 ? 429 : upstream.status >= 500 ? 503 : 502;
+      const error = upstream.status === 429 ? "ถึงโควตาฟรีชั่วคราวแล้ว ลองใหม่ภายหลังครับ" : "บริการ AI ยังไม่พร้อม กรุณาลองใหม่อีกครั้งครับ";
+      return jsonResponse({ error }, status, cors);
+    }
+    const answer = (result?.candidates?.[0]?.content?.parts || []).map(part => part.text || "").join("\n").trim();
+    if (!answer) return jsonResponse({ error: "AI ยังไม่ส่งคำตอบ ลองถามใหม่อีกครั้งครับ" }, 502, cors);
+    return jsonResponse({ answer }, 200, cors);
+  } catch {
+    return jsonResponse({ error: "เชื่อมต่อ AI ไม่สำเร็จ ตรวจสอบอินเทอร์เน็ตแล้วลองอีกครั้งครับ" }, 502, cors);
+  }
+}
+
 export default {
-  async fetch(request) {
+  async fetch(request, env) {
     const url = new URL(request.url);
+    if (url.pathname === "/api/dream-chat") return handleDreamChat(request, env);
     if (url.pathname === "/api/travel-subdistricts") {
       if (request.method !== "GET") return jsonResponse({ error: "Method not allowed" }, 405);
       try {
