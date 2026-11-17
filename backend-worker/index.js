@@ -46,7 +46,8 @@ async function handleDreamChat(request, env = {}) {
     featured: "ผู้ใช้กดเลขเด่นวันนี้ ให้ค้นข่าวรวบรวมเลขเด่นและแนวทางจากไทยรัฐ เดลินิวส์ และเว็บไซต์ข่าว/หวยที่ระบุงวดเป้าหมาย " + targetDraw + " อนุญาตบทความที่เผยแพร่ในช่วง 30 วันก่อนงวดหากตรงวันงวด ไม่จำกัดเฉพาะวันนี้ แยกเลขตามแต่ละสำนัก สรุปเลขที่ซ้ำโดยนับแหล่งอ้างอิงไม่ซ้ำ ระบุว่าเว็บใดเป็นต้นฉบับหรือเว็บรวบรวม ห้ามอ้างว่าเห็นทุกเพจ/กลุ่ม และห้ามสร้างเลขเพิ่ม วันที่วันนี้คือ " + today + ", งวดเป้าหมายคือ " + targetDraw,
     trending: "ผู้ใช้กดเลขดังตามกระแส ให้ค้นข่าวหรือโพสต์สาธารณะที่พูดถึงเลขสำหรับงวดเป้าหมาย " + targetDraw + " โดยค้นคำว่าเลขเด็ดงวดนี้, เลขดัง, เลขชน, ไทยรัฐ, เดลินิวส์ และชื่อสำนักที่ข่าวอ้าง รับโพสต์ก่อนวันงวดได้ภายใน 30 วันหากระบุงวดตรงกัน แสดงเลขแยกตามสำนัก พร้อมเว็บ วันที่เผยแพร่ และที่มาว่าเป็นต้นฉบับหรือเว็บรวบรวม ห้ามเรียกว่าเป็นกระแสทั่วโซเชียลจากตัวอย่างน้อย ห้ามสร้างเลขเพิ่ม วันที่วันนี้คือ " + today + ", งวดเป้าหมายคือ " + targetDraw,
   };
-  const prompt = common + "\n\nแนวทางคำตอบสำหรับหมวดนี้:\n" + intentGuides[intent] + (intent === "dream" ? "" : "\nคำสั่งสำคัญ: นี่เป็นปุ่มค้นหาข้อมูลออนไลน์ ไม่ใช่การถามเกี่ยวกับเอกสารแนบหรือไฟล์ที่อัปโหลด ห้ามตอบว่าได้ตรวจเอกสารที่ได้รับหรือระบบไม่มีเอกสาร ให้ใช้ผลการค้นเว็บที่หาได้จริงเท่านั้น หากไม่พบแหล่งข้อมูลที่ตรวจสอบได้ ให้แจ้งอย่างตรงไปตรงมาและไม่แสดงเลขสมมติ");
+  const dreamGuidance = intent === "dream" ? "\n\nข้อกำหนดเพิ่มเติมสำหรับคำทำนายฝัน: หากค้นไม่พบตำราหรือแหล่งอ้างอิงที่ตรงกับความฝัน ให้ยังตอบการตีความเชิงสัญลักษณ์และมุมมองความรู้สึกได้ โดยติดป้ายชัดว่าเป็นการตีความทั่วไป ไม่ใช่คำทำนายจากตำราที่ตรวจสอบแล้ว ห้ามอ้างชื่อหนังสือ เว็บไซต์ หรือผลค้นหาที่ไม่มีหลักฐาน ห้ามเสนอเลขเด่น เลข 2 ตัว หรือเลข 3 ตัวหากไม่มีแหล่งอ้างอิงที่ระบุตัวเลขนั้นตรง ๆ และให้บอกว่าไม่มีเลขที่ตรวจสอบจากแหล่งข้อมูลได้ ห้ามสื่อว่าการตีความนี้ทำนายอนาคตได้จริง" : "";
+  const prompt = common + "\n\nแนวทางคำตอบสำหรับหมวดนี้:\n" + intentGuides[intent] + dreamGuidance + (intent === "dream" ? "" : "\nคำสั่งสำคัญ: นี่เป็นปุ่มค้นหาข้อมูลออนไลน์ ไม่ใช่การถามเกี่ยวกับเอกสารแนบหรือไฟล์ที่อัปโหลด ห้ามตอบว่าได้ตรวจเอกสารที่ได้รับหรือระบบไม่มีเอกสาร ให้ใช้ผลการค้นเว็บที่หาได้จริงเท่านั้น หากไม่พบแหล่งข้อมูลที่ตรวจสอบได้ ให้แจ้งอย่างตรงไปตรงมาและไม่แสดงเลขสมมติ");
   const history = Array.isArray(body?.history) ? body.history.slice(-8).map(item => ({
     role: item?.role === "model" || item?.role === "assistant" ? "model" : "user",
     parts: [{ text: String(item?.text || "").slice(0, 700) }],
@@ -88,9 +89,29 @@ async function handleDreamChat(request, env = {}) {
     sourceMap.set(web.uri, { title: String(web.title || "แหล่งข้อมูล") .slice(0, 160), url: web.uri });
   }
   const sources = [...sourceMap.values()].slice(0, 8);
-  if (!answer) return jsonResponse({ error: "ยังไม่ได้รับคำตอบจากน้องอุ่นใจ ลองส่งอีกครั้งครับ" }, 502, cors);
+  if (!answer && intent !== "dream") return jsonResponse({ error: "ยังไม่ได้รับคำตอบจากน้องอุ่นใจ ลองส่งอีกครั้งครับ" }, 502, cors);
   if (!sources.length && intent !== "dream") return jsonResponse({ answer: "ยังไม่พบแหล่งข้อมูลออนไลน์ที่ตรวจสอบได้ในหมวดนี้ครับ ลองค้นหาใหม่ภายหลังได้ โดยน้องอุ่นใจจะไม่สร้างตัวเลขขึ้นเอง", sources: [], searchQueries, intent, updatedAt: today, verified: false }, 200, cors);
-  if (!sources.length) return jsonResponse({ error: "การค้นครั้งนี้ไม่พบแหล่งเว็บอ้างอิงครับ ลองใหม่อีกครั้งภายหลัง" }, 502, cors);
+  if (!sources.length && intent === "dream") {
+    // Without grounding evidence, never present unsupported numbers or invented citations.
+    let fallbackAnswer = "";
+    try {
+      const fallbackResponse = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-goog-api-key": apiKey },
+        body: JSON.stringify({
+          systemInstruction: { parts: [{ text: "คุณคือน้องอุ่นใจ ตอบภาษาไทยสุภาพ อธิบายความฝันตามการตีความสัญลักษณ์ทั่วไปและมุมมองด้านความรู้สึกเท่านั้น ต้องขึ้นต้นว่า 'การตีความทั่วไป (ไม่ใช่คำทำนายจากแหล่งอ้างอิงที่ตรวจสอบแล้ว)' ห้ามอ้างตำรา เว็บไซต์ แหล่งข่าวหรือผลค้นหา ห้ามให้ตัวเลขนำโชค เลขเด่น เลข 2 ตัว เลข 3 ตัว หรือเลขที่คาดเดาเอง ระบุชัดว่าไม่พบตัวเลขจากแหล่งอ้างอิงที่ตรวจสอบได้ ไม่รับประกันอนาคต ไม่ใช้ Markdown ตัวหนา" }] },
+          contents: [{ role: "user", parts: [{ text: message }] }],
+          generationConfig: { temperature: 0.3, maxOutputTokens: 1000 },
+        }),
+      });
+      if (fallbackResponse.ok) {
+        const fallbackData = await fallbackResponse.json();
+        fallbackAnswer = (fallbackData?.candidates?.[0]?.content?.parts || []).map(part => part.text || "").join("\n").replace(/\*{1,2}/g, "").trim();
+      }
+    } catch { /* Keep the honest no-source response below. */ }
+    const safeAnswer = fallbackAnswer || "การตีความทั่วไป (ไม่ใช่คำทำนายจากแหล่งอ้างอิงที่ตรวจสอบแล้ว)\nน้องอุ่นใจยังไม่สามารถตีความความฝันนี้ได้ในขณะนี้ครับ กรุณาลองใหม่ภายหลัง\nไม่พบตัวเลขจากแหล่งอ้างอิงที่ตรวจสอบได้";
+    return jsonResponse({ answer: safeAnswer, sources: [], searchQueries, intent, updatedAt: today, verified: false }, 200, cors);
+  }
   return jsonResponse({ answer, sources, searchQueries, intent, updatedAt: today }, 200, cors);
 }
 
