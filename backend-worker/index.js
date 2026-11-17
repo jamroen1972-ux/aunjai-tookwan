@@ -80,8 +80,8 @@ async function handleDreamChat(request, env = {}) {
   const contents = [...history, { role: "user", parts: [{ text: `คำถาม: ${message}\n\nผลค้นหา Tavily:\n${evidence || "(ไม่พบแหล่งข้อมูลที่เกี่ยวข้อง)"}\n\nตอบคำถามโดยแยกข้อมูลที่ค้นพบกับการตีความทั่วไป` }] }];
   // Keep API credentials in Worker Secrets. Try an alternate model only for
   // model availability, quota, or temporary upstream errors.
-  const preferredModel = String(env.GEMINI_GROUNDING_MODEL || "gemini-2.5-flash").trim();
-  const fallbackModel = String(env.GEMINI_FALLBACK_MODEL || "gemini-2.5-flash-lite").trim();
+  const preferredModel = String(env.GEMINI_GROUNDING_MODEL || "gemini-3.5-flash-lite").trim();
+  const fallbackModel = String(env.GEMINI_FALLBACK_MODEL || "gemini-2.5-flash").trim();
   const models = [...new Set([preferredModel, fallbackModel].filter(Boolean))];
   const requestBody = JSON.stringify({
     systemInstruction: { parts: [{ text: instruction }] },
