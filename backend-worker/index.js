@@ -91,7 +91,8 @@ async function handleDreamChat(request, env = {}) {
   const sources = [...sourceMap.values()].slice(0, 8);
   if (!answer && intent !== "dream") return jsonResponse({ error: "ยังไม่ได้รับคำตอบจากน้องอุ่นใจ ลองส่งอีกครั้งครับ" }, 502, cors);
   if (!sources.length && intent !== "dream") return jsonResponse({ answer: "ยังไม่พบแหล่งข้อมูลออนไลน์ที่ตรวจสอบได้ในหมวดนี้ครับ ลองค้นหาใหม่ภายหลังได้ โดยน้องอุ่นใจจะไม่สร้างตัวเลขขึ้นเอง", sources: [], searchQueries, intent, updatedAt: today, verified: false }, 200, cors);
-  if (!sources.length && intent === "dream") {
+  const dreamRefusal = intent === "dream" && /(?:ไม่พบ|ยังไม่พบ|หาไม่พบ|ไม่สามารถหา).{0,110}(?:แหล่งข้อมูล|แหล่งอ้างอิง|ตำรา|คำทำนาย)|(?:จึง|เลย).{0,45}(?:ไม่สรุป|ไม่สามารถสรุป|ไม่ทำนาย)/s.test(answer);
+  if (intent === "dream" && (!sources.length || dreamRefusal || !answer)) {
     // Without grounding evidence, never present unsupported numbers or invented citations.
     let fallbackAnswer = "";
     try {
@@ -109,6 +110,8 @@ async function handleDreamChat(request, env = {}) {
         fallbackAnswer = (fallbackData?.candidates?.[0]?.content?.parts || []).map(part => part.text || "").join("\n").replace(/\*{1,2}/g, "").trim();
       }
     } catch { /* Keep the honest no-source response below. */ }
+    // Do not leak an unsupported numerical prediction in the fallback.
+    if (/(?:เลข(?:เด่น|นำโชค|มงคล|สองตัว|สามตัว| 2 ตัว| 3 ตัว)|ตัวเลข(?:นำโชค|ที่แนะนำ))\s*[:：-]?\s*\d/.test(fallbackAnswer)) fallbackAnswer = "";
     const safeAnswer = fallbackAnswer || "การตีความทั่วไป (ไม่ใช่คำทำนายจากแหล่งอ้างอิงที่ตรวจสอบแล้ว)\nน้องอุ่นใจยังไม่สามารถตีความความฝันนี้ได้ในขณะนี้ครับ กรุณาลองใหม่ภายหลัง\nไม่พบตัวเลขจากแหล่งอ้างอิงที่ตรวจสอบได้";
     return jsonResponse({ answer: safeAnswer, sources: [], searchQueries, intent, updatedAt: today, verified: false }, 200, cors);
   }
