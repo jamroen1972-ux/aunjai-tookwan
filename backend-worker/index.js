@@ -17,6 +17,81 @@ function jsonResponse(payload, status = 200, extraHeaders = {}) {
   });
 }
 
+const DREAM_DEFAULT_MODELS = ["gemini-3.8-flash", "gemini-3.6-flash"];
+
+function dreamModelList(env) {
+  const configured = [env.GEMINI_GROUNDING_MODEL, env.GEMINI_MODEL].map(v => String(v || "").trim()).filter(Boolean);
+  return [...new Set([...configured, ...DREAM_DEFAULT_MODELS])];
+}
+
+function dreamGenerationConfig(model, intent) {
+  const config = { maxOutputTokens: 4096 };
+  if (/^gemini-3/.test(model)) {
+    // Gemini 3.x: thinking is on by default and shares the output budget; keep it light, drop sampling params.
+    config.thinkingConfig = { thinkingLevel: "low" };
+  } else {
+    config.temperature = intent === "dream" ? 0.55 : 0.25;
+    if (/^gemini-2\.5-flash/.test(model)) config.thinkingConfig = { thinkingBudget: 0 };
+  }
+  return config;
+}
+
+// Gemini wants alternating turns that start with "user" and end with the current user message.
+function buildDreamContents(history, message) {
+  const turns = [];
+  for (const item of history) {
+    const last = turns[turns.length - 1];
+    if (last && last.role === item.role) last.parts[0].text += "\n" + item.parts[0].text;
+    else turns.push({ role: item.role, parts: [{ text: item.parts[0].text }] });
+  }
+  while (turns.length && turns[0].role !== "user") turns.shift();
+  const last = turns[turns.length - 1];
+  if (last && last.role === "user" && last.parts[0].text.trim() === message.trim()) return turns;
+  if (last && last.role === "user") last.parts[0].text += "\n" + message;
+  else turns.push({ role: "user", parts: [{ text: message }] });
+  return turns;
+}
+
+async function callGeminiWithFallback(env, apiKey, models, intent, payloadFor) {
+  let lastStatus = 0;
+  for (const model of models) {
+    let upstream;
+    try {
+      upstream = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-goog-api-key": apiKey },
+        body: JSON.stringify(payloadFor(model)),
+      });
+    } catch {
+      return { networkError: true };
+    }
+    if (upstream.ok) return { model, result: await upstream.json().catch(() => ({})) };
+    lastStatus = upstream.status;
+    if (upstream.status === 404 || upstream.status === 400) continue; // retired model / unsupported option -> try next model
+    return { status: upstream.status };
+  }
+  return { status: lastStatus || 404 };
+}
+
+function readDreamCandidate(result) {
+  const candidate = result?.candidates?.[0];
+  const answer = (candidate?.content?.parts || []).filter(part => !part.thought).map(part => part.text || "").join("\n").replace(/\*{1,2}/g, "").trim();
+  const grounding = candidate?.groundingMetadata || {};
+  const sourceMap = new Map();
+  for (const chunk of grounding.groundingChunks || []) {
+    const web = chunk?.web;
+    if (!web?.uri || !/^https?:\/\//i.test(web.uri)) continue;
+    sourceMap.set(web.uri, { title: String(web.title || "แหล่งข้อมูล").slice(0, 160), url: web.uri });
+  }
+  return {
+    answer,
+    sources: [...sourceMap.values()].slice(0, 8),
+    searchQueries: Array.isArray(grounding.webSearchQueries) ? grounding.webSearchQueries : [],
+    finishReason: candidate?.finishReason || "",
+    blocked: Boolean(result?.promptFeedback?.blockReason),
+  };
+}
+
 async function handleDreamChat(request, env = {}) {
   const cors = lotteryCorsHeaders(request);
   if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: { ...cors, "access-control-allow-methods": "POST, OPTIONS", "access-control-allow-headers": "content-type", "access-control-max-age": "86400" } });
@@ -38,60 +113,60 @@ async function handleDreamChat(request, env = {}) {
   else if (Number(nowParts.day) <= 16) drawDate.setUTCDate(16);
   else drawDate.setUTCMonth(drawDate.getUTCMonth() + 1, 1);
   const targetDraw = new Intl.DateTimeFormat("th-TH", { dateStyle: "full", timeZone: "Asia/Bangkok" }).format(drawDate);
-  const common = "คุณคือน้องอุ่นใจ ผู้ช่วยภาษาไทย สุภาพ แทนตัวเองว่า “น้องอุ่นใจ” เท่านั้น ห้ามเรียกตัวเองว่า AI หรือ Gemini ไม่ใช้เครื่องหมายดอกจันหรือ Markdown ตัวหนา แยกข้อเท็จจริงจากความเชื่อ ไม่รับประกันผลและไม่ชี้นำให้เสี่ยงเงิน ใช้ Google Search grounding ค้นข้อมูลก่อนตอบ ห้ามแต่งชื่อแหล่ง ตัวเลข หรือวันที่ ตัวเลขทุกตัวที่นำเสนอเป็นคำทำนายต้องปรากฏอยู่ในแหล่งที่ค้นได้ ห้ามคำนวณหรือคาดเดาตัวเลขเพิ่ม ถ้าไม่พบแหล่งที่ระบุเลขโดยตรงให้บอกว่าไม่พบข้อมูลที่ยืนยันได้ พร้อมแสดงแหล่งที่ค้นพบ";
+
+  const common = "คุณคือน้องอุ่นใจ ผู้ช่วยภาษาไทย สุภาพ แทนตัวเองว่า “น้องอุ่นใจ” เท่านั้น ห้ามเรียกตัวเองว่า AI หรือ Gemini ไม่ใช้เครื่องหมายดอกจันหรือ Markdown ตัวหนา แยกข้อเท็จจริงจากความเชื่อ ไม่รับประกันผลและไม่ชี้นำให้เสี่ยงเงิน ห้ามแต่งชื่อแหล่ง ตัวเลข หรือวันที่ ตอบให้จบประโยคและครบทุกส่วนเสมอ";
   const intentGuides = {
-    dream: "ผู้ใช้เล่าความฝัน ให้ตอบครบ 4 ส่วน: สรุปความหมายตามความเชื่อไทย, รายละเอียดคำทำนายจากตำราหรือเว็บที่ค้นพบ, มุมมองด้านชีวิตและความรู้สึกที่ไม่ฟันธง, และตัวเลขที่พบจริงจากแหล่งอ้างอิง แยกเลขเด่น เลข 2 ตัว และเลข 3 ตัวให้ชัด ถ้าสร้างชุดเรียงเลขจากเลขเด่นให้ติดป้ายว่าเป็นชุดที่คำนวณต่อ ไม่ใช่ตัวเลขที่เว็บให้โดยตรง ระบุชื่อแหล่งในคำตอบ ความยาวพออธิบายครบ ไม่ต้องทักทายซ้ำ วันที่วันนี้คือ " + today,
+    dream: "ผู้ใช้เล่าความฝันหรือถามต่อเกี่ยวกับความฝันที่คุยกันอยู่ ให้ตอบตรงประเด็นกับความฝันที่ผู้ใช้เล่าในข้อความล่าสุดเท่านั้น (ถ้าเป็นคำถามต่อเนื่อง เช่น ขอเลข ให้อิงความฝันก่อนหน้าในบทสนทนา) ตอบเป็นภาษาไทย 4 ส่วนสั้น ๆ: 1) สรุปความหมายตามความเชื่อไทยของสิ่งที่ฝัน 2) รายละเอียดคำทำนายตามตำราหรือเว็บที่ค้นพบ 3) มุมมองด้านชีวิตและความรู้สึกที่ไม่ฟันธง 4) เลขที่เกี่ยวข้อง: ให้ค้นหาเลขทำนายฝันของสิ่งนั้นจากตำราหรือเว็บไทย แล้วสรุปเฉพาะเลขที่ปรากฏในแหล่งที่ค้นพบ พร้อมชื่อแหล่ง ถ้าไม่พบแหล่งที่ระบุเลขให้บอกสั้น ๆ ว่าไม่พบเลขที่ยืนยันได้ และห้ามแต่งเลขเอง ถ้าสร้างชุดเรียงจากเลขเด่น ให้ติดป้ายว่าเป็นชุดที่คำนวณต่อ ไม่ใช่เลขที่เว็บให้โดยตรง ใช้การค้นเว็บเมื่อช่วยให้คำตอบแม่นขึ้น วันที่วันนี้คือ " + today,
     daily_power: "ผู้ใช้กดเลขกำลังวันนี้ ให้ค้นหาตารางหรือบทความเลขกำลังวันสำหรับงวดสลากเป้าหมาย " + targetDraw + " โดยลองคำค้นตรง เช่น เลขกำลังวัน, ตารางเลขกำลังวัน, ผังมงคล 9 ช่อง, เลขกำลังวันจันทร์/วันอื่นพร้อมวันที่งวด และค้นชื่อสำนักข่าวไทยรัฐกับเดลินิวส์ด้วย ไม่จำกัดวันเผยแพร่เป็นวันนี้เท่านั้น: รับบทความย้อนหลังได้ถึง 30 วันเมื่อระบุวันงวดเป้าหมายชัดเจน หากเป็นเว็บที่นำโพยมาเผยแพร่ซ้ำ ให้ระบุว่าเป็นเว็บผู้เผยแพร่ซ้ำ และอย่าอ้างว่าเป็นต้นฉบับไทยรัฐหรือเดลินิวส์หากยืนยันไม่ได้ สรุปเฉพาะตัวเลขที่บทความระบุ แยกเลขกำลังตามตำราออกจากเลขในตาราง/ชุดที่สำนักจัดไว้ ระบุชื่อเว็บ วันที่เผยแพร่ และวันงวด เลข 2/3 ตัวที่เว็บจัดไว้ให้แสดงตามต้นฉบับ ห้ามสร้างชุดเพิ่ม ถ้าหาไม่พบให้บอกตรง ๆ วันที่วันนี้คือ " + today + ", งวดเป้าหมายคือ " + targetDraw,
     calendar: "ผู้ใช้กดเลขจากปฏิทินวันนี้ ให้ค้นเลขปฏิทินจีนหรือปฏิทินใบ้เลขสำหรับงวดเป้าหมาย " + targetDraw + " โดยใช้คำค้น เลขเด็ดปฏิทินจีน, ปฏิทินจีนพร้อมวันที่งวด และชื่อปฏิทินที่เป็นที่รู้จัก รับบทความที่เผยแพร่ก่อนวันงวดได้ถ้าระบุวันที่งวดตรงกัน ไม่จำกัดเฉพาะโพสต์วันนี้ แยกเลขตามแต่ละปฏิทิน ระบุเว็บ/วันที่/งวด ถ้าเป็นภาพและอ่านข้อความไม่ได้ ห้ามคาดเดา แสดงที่มาที่ค้นพบ วันที่วันนี้คือ " + today + ", งวดเป้าหมายคือ " + targetDraw,
     featured: "ผู้ใช้กดเลขเด่นวันนี้ ให้ค้นข่าวรวบรวมเลขเด่นและแนวทางจากไทยรัฐ เดลินิวส์ และเว็บไซต์ข่าว/หวยที่ระบุงวดเป้าหมาย " + targetDraw + " อนุญาตบทความที่เผยแพร่ในช่วง 30 วันก่อนงวดหากตรงวันงวด ไม่จำกัดเฉพาะวันนี้ แยกเลขตามแต่ละสำนัก สรุปเลขที่ซ้ำโดยนับแหล่งอ้างอิงไม่ซ้ำ ระบุว่าเว็บใดเป็นต้นฉบับหรือเว็บรวบรวม ห้ามอ้างว่าเห็นทุกเพจ/กลุ่ม และห้ามสร้างเลขเพิ่ม วันที่วันนี้คือ " + today + ", งวดเป้าหมายคือ " + targetDraw,
     trending: "ผู้ใช้กดเลขดังตามกระแส ให้ค้นข่าวหรือโพสต์สาธารณะที่พูดถึงเลขสำหรับงวดเป้าหมาย " + targetDraw + " โดยค้นคำว่าเลขเด็ดงวดนี้, เลขดัง, เลขชน, ไทยรัฐ, เดลินิวส์ และชื่อสำนักที่ข่าวอ้าง รับโพสต์ก่อนวันงวดได้ภายใน 30 วันหากระบุงวดตรงกัน แสดงเลขแยกตามสำนัก พร้อมเว็บ วันที่เผยแพร่ และที่มาว่าเป็นต้นฉบับหรือเว็บรวบรวม ห้ามเรียกว่าเป็นกระแสทั่วโซเชียลจากตัวอย่างน้อย ห้ามสร้างเลขเพิ่ม วันที่วันนี้คือ " + today + ", งวดเป้าหมายคือ " + targetDraw,
   };
-  const prompt = common + "\n\nแนวทางคำตอบสำหรับหมวดนี้:\n" + intentGuides[intent] + (intent === "dream" ? "" : "\nคำสั่งสำคัญ: นี่เป็นปุ่มค้นหาข้อมูลออนไลน์ ไม่ใช่การถามเกี่ยวกับเอกสารแนบหรือไฟล์ที่อัปโหลด ห้ามตอบว่าได้ตรวจเอกสารที่ได้รับหรือระบบไม่มีเอกสาร ให้ใช้ผลการค้นเว็บที่หาได้จริงเท่านั้น หากไม่พบแหล่งข้อมูลที่ตรวจสอบได้ ให้แจ้งอย่างตรงไปตรงมาและไม่แสดงเลขสมมติ");
+  const searchRule = "\nต้องใช้ผลการค้นเว็บจริงก่อนตอบ ตัวเลขทุกตัวที่นำเสนอเป็นคำทำนายต้องปรากฏอยู่ในแหล่งที่ค้นได้ ห้ามคำนวณหรือคาดเดาตัวเลขเพิ่ม ถ้าไม่พบแหล่งที่ระบุเลขโดยตรงให้บอกว่าไม่พบข้อมูลที่ยืนยันได้ พร้อมแสดงแหล่งที่ค้นพบ";
+  const buttonRule = "\nคำสั่งสำคัญ: นี่เป็นปุ่มค้นหาข้อมูลออนไลน์ ไม่ใช่การถามเกี่ยวกับเอกสารแนบหรือไฟล์ที่อัปโหลด ห้ามตอบว่าได้ตรวจเอกสารที่ได้รับหรือระบบไม่มีเอกสาร ให้ใช้ผลการค้นเว็บที่หาได้จริงเท่านั้น หากไม่พบแหล่งข้อมูลที่ตรวจสอบได้ ให้แจ้งอย่างตรงไปตรงมาและไม่แสดงเลขสมมติ";
+  const prompt = common + "\n\nแนวทางคำตอบสำหรับหมวดนี้:\n" + intentGuides[intent] + searchRule + (intent === "dream" ? "" : buttonRule);
+
   const history = Array.isArray(body?.history) ? body.history.slice(-8).map(item => ({
     role: item?.role === "model" || item?.role === "assistant" ? "model" : "user",
     parts: [{ text: String(item?.text || "").slice(0, 700) }],
   })).filter(item => item.parts[0].text) : [];
-  const contents = intent === "dream" && history.length ? history : [{ role: "user", parts: [{ text: intent === "dream" ? message : ("คำขอค้นเว็บจากปุ่ม: " + message + " โปรดค้นข้อมูลออนไลน์ภาษาไทยที่เกี่ยวข้องกับหมวด " + intent + " ตามคำสั่งระบบ แสดงชื่อแหล่งและลิงก์ที่ตรวจสอบได้ หากไม่มีแหล่งที่ระบุตัวเลขจริง อย่าแต่งตัวเลข") }] }];
-  const model = String(env.GEMINI_GROUNDING_MODEL || "gemini-2.5-flash");
-  let upstream;
-  try {
-    upstream = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
-      method: "POST",
-      headers: { "content-type": "application/json", "x-goog-api-key": apiKey },
-      body: JSON.stringify({
-        systemInstruction: { parts: [{ text: prompt }] },
-        contents,
-        tools: [{ google_search: {} }],
-        generationConfig: { temperature: intent === "dream" ? 0.55 : 0.25, maxOutputTokens: 1600 },
-      }),
-    });
-  } catch {
-    return jsonResponse({ error: "เชื่อมต่อการค้นเว็บไม่สำเร็จ กรุณาลองใหม่ครับ" }, 502, cors);
-  }
-  const result = await upstream.json().catch(() => ({}));
-  if (!upstream.ok) {
-    const status = upstream.status;
+  const buttonTask = "คำขอค้นเว็บจากปุ่ม: " + message + " โปรดค้นข้อมูลออนไลน์ภาษาไทยที่เกี่ยวข้องกับหมวด " + intent + " สำหรับงวด " + targetDraw + " ตามคำสั่งระบบ แสดงชื่อแหล่งและลิงก์ที่ตรวจสอบได้ หากไม่มีแหล่งที่ระบุตัวเลขจริง อย่าแต่งตัวเลข";
+  const contents = intent === "dream" ? buildDreamContents(history, message) : [{ role: "user", parts: [{ text: buttonTask }] }];
+  const models = dreamModelList(env);
+
+  const askGemini = (extraInstruction) => callGeminiWithFallback(env, apiKey, models, intent, (model) => ({
+    systemInstruction: { parts: [{ text: prompt + (extraInstruction || "") }] },
+    contents,
+    tools: [{ google_search: {} }],
+    generationConfig: dreamGenerationConfig(model, intent),
+  }));
+
+  let call = await askGemini("");
+  if (call.networkError) return jsonResponse({ error: "เชื่อมต่อการค้นเว็บไม่สำเร็จ กรุณาลองใหม่ครับ" }, 502, cors);
+  if (call.status) {
+    const status = call.status;
     if (status === 401 || status === 403) return jsonResponse({ error: "Gemini ปฏิเสธกุญแจ API หรือยังไม่ได้เปิดใช้ Google Search grounding" }, 502, cors);
-    if (status === 404) return jsonResponse({ error: "ไม่พบรุ่นโมเดลค้นเว็บที่ตั้งไว้ กรุณาตรวจ GEMINI_GROUNDING_MODEL" }, 502, cors);
+    if (status === 404 || status === 400) return jsonResponse({ error: "รุ่นโมเดล Gemini ที่ตั้งไว้ใช้ไม่ได้ กรุณาตั้ง GEMINI_GROUNDING_MODEL เป็น gemini-3.8-flash" }, 502, cors);
     if (status === 429) return jsonResponse({ error: "โควตาค้นเว็บฟรีเต็มชั่วคราว กรุณาลองใหม่ภายหลัง" }, 429, cors);
     return jsonResponse({ error: "บริการค้นเว็บของน้องอุ่นใจยังไม่พร้อม ลองใหม่อีกครั้งครับ" }, status >= 500 ? 503 : 502, cors);
   }
-  const candidate = result?.candidates?.[0];
-  const answer = (candidate?.content?.parts || []).map(part => part.text || "").join("\n").replace(/\*{1,2}/g, "").trim();
-  const grounding = candidate?.groundingMetadata || {};
-  const chunks = grounding.groundingChunks || [];
-  const searchQueries = Array.isArray(grounding.webSearchQueries) ? grounding.webSearchQueries : [];
-  const sourceMap = new Map();
-  for (const chunk of chunks) {
-    const web = chunk?.web;
-    if (!web?.uri || !/^https?:\/\//i.test(web.uri)) continue;
-    sourceMap.set(web.uri, { title: String(web.title || "แหล่งข้อมูล") .slice(0, 160), url: web.uri });
+  let out = readDreamCandidate(call.result);
+
+  // Button searches must be grounded: if the model skipped the search tool, retry once and insist on searching.
+  if (intent !== "dream" && out.answer && !out.sources.length) {
+    const retry = await askGemini("\nการตอบครั้งก่อนไม่ได้ค้นเว็บ ให้เรียกใช้ Google Search ทันทีและอ้างอิงผลที่ค้นได้เท่านั้น");
+    if (!retry.networkError && !retry.status) { const second = readDreamCandidate(retry.result); if (second.answer) out = second; }
   }
-  const sources = [...sourceMap.values()].slice(0, 8);
-  if (!answer) return jsonResponse({ error: "ยังไม่ได้รับคำตอบจากน้องอุ่นใจ ลองส่งอีกครั้งครับ" }, 502, cors);
-  if (!sources.length && intent !== "dream") return jsonResponse({ answer: "ยังไม่พบแหล่งข้อมูลออนไลน์ที่ตรวจสอบได้ในหมวดนี้ครับ ลองค้นหาใหม่ภายหลังได้ โดยน้องอุ่นใจจะไม่สร้างตัวเลขขึ้นเอง", sources: [], searchQueries, intent, updatedAt: today, verified: false }, 200, cors);
-  if (!sources.length) return jsonResponse({ error: "การค้นครั้งนี้ไม่พบแหล่งเว็บอ้างอิงครับ ลองใหม่อีกครั้งภายหลัง" }, 502, cors);
-  return jsonResponse({ answer, sources, searchQueries, intent, updatedAt: today }, 200, cors);
+  if (out.blocked) return jsonResponse({ error: "ขออภัยครับ น้องอุ่นใจตอบคำถามนี้ไม่ได้ ลองเรียบเรียงคำถามใหม่อีกครั้งครับ" }, 502, cors);
+  if (!out.answer) return jsonResponse({ error: "ยังไม่ได้รับคำตอบจากน้องอุ่นใจ ลองส่งอีกครั้งครับ" }, 502, cors);
+  let answer = out.answer;
+  if (out.finishReason === "MAX_TOKENS") answer += "\n\n(คำตอบยาวและถูกตัดตอน หากต้องการส่วนที่เหลือ พิมพ์ว่า “ต่อ” ได้เลยครับ)";
+  const base = { answer, sources: out.sources, searchQueries: out.searchQueries, intent, updatedAt: today };
+  if (!out.sources.length) {
+    if (intent !== "dream") return jsonResponse({ answer: "ยังไม่พบแหล่งข้อมูลออนไลน์ที่ตรวจสอบได้ในหมวดนี้ครับ ลองค้นหาใหม่ภายหลังได้ โดยน้องอุ่นใจจะไม่สร้างตัวเลขขึ้นเอง", sources: [], searchQueries: out.searchQueries, intent, updatedAt: today, verified: false }, 200, cors);
+    return jsonResponse({ ...base, verified: false }, 200, cors); // plain dream chat: answer even without cited sources
+  }
+  return jsonResponse(base, 200, cors);
 }
 
 export default {
