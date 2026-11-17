@@ -1,0 +1,21 @@
+name: Apply dream AI reliability fix
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch files
+        run: python3 fix_dream_buttons.py
+      - name: Commit only the three updated app files
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add index.html backend-worker/index.js sw.js
+          if ! git diff --cached --quiet; then
+            git commit -m "Fix dream daily quick buttons response and cache reliability"
+            git push
+          fi
