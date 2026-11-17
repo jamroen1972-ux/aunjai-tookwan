@@ -46,12 +46,12 @@ async function handleDreamChat(request, env = {}) {
     featured: "ผู้ใช้กดเลขเด่นวันนี้ ให้ค้นข่าวรวบรวมเลขเด่นและแนวทางจากไทยรัฐ เดลินิวส์ และเว็บไซต์ข่าว/หวยที่ระบุงวดเป้าหมาย " + targetDraw + " อนุญาตบทความที่เผยแพร่ในช่วง 30 วันก่อนงวดหากตรงวันงวด ไม่จำกัดเฉพาะวันนี้ แยกเลขตามแต่ละสำนัก สรุปเลขที่ซ้ำโดยนับแหล่งอ้างอิงไม่ซ้ำ ระบุว่าเว็บใดเป็นต้นฉบับหรือเว็บรวบรวม ห้ามอ้างว่าเห็นทุกเพจ/กลุ่ม และห้ามสร้างเลขเพิ่ม วันที่วันนี้คือ " + today + ", งวดเป้าหมายคือ " + targetDraw,
     trending: "ผู้ใช้กดเลขดังตามกระแส ให้ค้นข่าวหรือโพสต์สาธารณะที่พูดถึงเลขสำหรับงวดเป้าหมาย " + targetDraw + " โดยค้นคำว่าเลขเด็ดงวดนี้, เลขดัง, เลขชน, ไทยรัฐ, เดลินิวส์ และชื่อสำนักที่ข่าวอ้าง รับโพสต์ก่อนวันงวดได้ภายใน 30 วันหากระบุงวดตรงกัน แสดงเลขแยกตามสำนัก พร้อมเว็บ วันที่เผยแพร่ และที่มาว่าเป็นต้นฉบับหรือเว็บรวบรวม ห้ามเรียกว่าเป็นกระแสทั่วโซเชียลจากตัวอย่างน้อย ห้ามสร้างเลขเพิ่ม วันที่วันนี้คือ " + today + ", งวดเป้าหมายคือ " + targetDraw,
   };
-  const prompt = common + "\n\nแนวทางคำตอบสำหรับหมวดนี้:\n" + intentGuides[intent];
+  const prompt = common + "\n\nแนวทางคำตอบสำหรับหมวดนี้:\n" + intentGuides[intent] + (intent === "dream" ? "" : "\nคำสั่งสำคัญ: นี่เป็นปุ่มค้นหาข้อมูลออนไลน์ ไม่ใช่การถามเกี่ยวกับเอกสารแนบหรือไฟล์ที่อัปโหลด ห้ามตอบว่าได้ตรวจเอกสารที่ได้รับหรือระบบไม่มีเอกสาร ให้ใช้ผลการค้นเว็บที่หาได้จริงเท่านั้น หากไม่พบแหล่งข้อมูลที่ตรวจสอบได้ ให้แจ้งอย่างตรงไปตรงมาและไม่แสดงเลขสมมติ");
   const history = Array.isArray(body?.history) ? body.history.slice(-8).map(item => ({
     role: item?.role === "model" || item?.role === "assistant" ? "model" : "user",
     parts: [{ text: String(item?.text || "").slice(0, 700) }],
   })).filter(item => item.parts[0].text) : [];
-  const contents = intent === "dream" && history.length ? history : [{ role: "user", parts: [{ text: message }] }];
+  const contents = intent === "dream" && history.length ? history : [{ role: "user", parts: [{ text: intent === "dream" ? message : ("คำขอค้นเว็บจากปุ่ม: " + message + " โปรดค้นข้อมูลออนไลน์ภาษาไทยที่เกี่ยวข้องกับหมวด " + intent + " ตามคำสั่งระบบ แสดงชื่อแหล่งและลิงก์ที่ตรวจสอบได้ หากไม่มีแหล่งที่ระบุตัวเลขจริง อย่าแต่งตัวเลข") }] }];
   const model = String(env.GEMINI_GROUNDING_MODEL || "gemini-2.5-flash");
   let upstream;
   try {
@@ -89,6 +89,7 @@ async function handleDreamChat(request, env = {}) {
   }
   const sources = [...sourceMap.values()].slice(0, 8);
   if (!answer) return jsonResponse({ error: "ยังไม่ได้รับคำตอบจากน้องอุ่นใจ ลองส่งอีกครั้งครับ" }, 502, cors);
+  if (!sources.length && intent !== "dream") return jsonResponse({ answer: "ยังไม่พบแหล่งข้อมูลออนไลน์ที่ตรวจสอบได้ในหมวดนี้ครับ ลองค้นหาใหม่ภายหลังได้ โดยน้องอุ่นใจจะไม่สร้างตัวเลขขึ้นเอง", sources: [], searchQueries, intent, updatedAt: today, verified: false }, 200, cors);
   if (!sources.length) return jsonResponse({ error: "การค้นครั้งนี้ไม่พบแหล่งเว็บอ้างอิงครับ ลองใหม่อีกครั้งภายหลัง" }, 502, cors);
   return jsonResponse({ answer, sources, searchQueries, intent, updatedAt: today }, 200, cors);
 }
